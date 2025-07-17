@@ -268,15 +268,17 @@
                 </div>
 
                 <div class="checkbox-group">
-                    <input type="checkbox" id="stream" checked>
+                    <input type="checkbox" id="stream">
                     <label for="stream">Stream Response</label>
                 </div>
 
-                <button class="generate-btn" id="clearChat">Clear Chat</button>
+                <button class="generate-btn" id="refreshProviders">Refresh Providers</button>
+                <button class="generate-btn" id="clearChat" style="margin-top: 10px;">Clear Chat</button>
 
-                <div class="provider-info">
+                <div class="provider-info" id="providerInfo">
                     <strong>Available Providers:</strong> {{ providers|length }}<br>
-                    <strong>Available Models:</strong> {{ models|length }}
+                    <strong>Available Models:</strong> {{ models|length }}<br>
+                    <strong>Working Providers:</strong> <span id="workingCount">Testing...</span>
                 </div>
             </div>
 
@@ -339,9 +341,50 @@
             isGenerating = generating;
             document.getElementById('sendBtn').disabled = generating;
             document.getElementById('userInput').disabled = generating;
+            document.getElementById('refreshProviders').disabled = generating;
             
             if (generating) {
                 updateStatus('Generating response...', 'loading');
+            }
+        }
+
+        async function refreshProviders() {
+            try {
+                updateStatus('Refreshing providers...', 'loading');
+                
+                const response = await fetch('/api/refresh-providers', {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                const workingCount = data.working_providers.length;
+                document.getElementById('workingCount').textContent = `${workingCount} working`;
+                
+                updateStatus(`Found ${workingCount} working providers`, 'success');
+                
+            } catch (error) {
+                console.error('Error refreshing providers:', error);
+                updateStatus(`Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function checkHealth() {
+            try {
+                const response = await fetch('/api/health');
+                const data = await response.json();
+                
+                if (data.working_providers) {
+                    document.getElementById('workingCount').textContent = `${data.working_count} working`;
+                }
+                
+            } catch (error) {
+                console.error('Error checking health:', error);
+                document.getElementById('workingCount').textContent = 'Unknown';
             }
         }
 
@@ -398,6 +441,94 @@
                     const chatMessages = document.getElementById('chatMessages');
                     const messageDiv = document.createElement('div');
                     messageDiv.className = 'message assistant';
+                    messageDiv.textContent = 'Thinking...';
+                    chatMessages.appendChild(messageDiv);
+                    
+                    let hasContent = false;
+                    
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        
+                        const chunk = decoder.decode(value);
+                        const lines = chunk.split('\n');
+                        
+                        for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(line.slice(6));
+                                    if (data.content) {
+                                        if (!hasContent) {
+                                            messageDiv.textContent = '';
+                                            hasContent = true;
+                                        }
+                                        assistantResponse += data.content;
+                                        messageDiv.textContent = assistantResponse;
+                                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                                    } else if (data.error) {
+                                        throw new Error(data.error);
+                                    } else if (data.done) {
+                                        break;
+                                    }
+                                } catch (e) {
+                                    if (line.slice(6).trim()) {
+                                        console.error('Error parsing stream data:', e, 'Line:', line);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (assistantResponse.trim()) {
+                        conversationHistory.push({ role: 'assistant', content: assistantResponse });
+                        updateStatus('Response generated successfully!', 'success');
+                    } else {
+                        messageDiv.textContent = 'No response received. Try a different provider.';
+                        messageDiv.className += ' error';
+                        updateStatus('No response received', 'error');
+                    }
+                } else {
+                    const data = await response.json();
+                    console.log('Received response:', data);
+                    
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    
+                    if (data.response && data.response.trim()) {
+                        addMessage(data.response, 'assistant');
+                        conversationHistory.push({ role: 'assistant', content: data.response });
+                        updateStatus('Response generated successfully!', 'success');
+                    } else {
+                        throw new Error('No response received from server');
+                    }
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage(`Error: ${error.message}`, 'assistant', true);
+                updateStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                setGenerating(false);
+            }
+        }
+
+        function clearChat() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.innerHTML = '<div class="message assistant">Chat cleared. Ready for new conversation!</div>';
+            conversationHistory = [];
+            document.getElementById('status').style.display = 'none';
+        }
+
+        // Event listeners
+        document.getElementById('clearChat').addEventListener('click', clearChat);
+        document.getElementById('refreshProviders').addEventListener('click', refreshProviders);
+        
+        // Focus on input when page loads and check health
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('userInput').focus();
+            checkHealth();
+        });
+    </script>    messageDiv.className = 'message assistant';
                     messageDiv.textContent = 'Thinking...';
                     chatMessages.appendChild(messageDiv);
                     
