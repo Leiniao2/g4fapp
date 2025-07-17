@@ -364,6 +364,13 @@
             setGenerating(true);
             
             try {
+                console.log('Sending request:', {
+                    messages: conversationHistory,
+                    provider: provider || null,
+                    model: model || null,
+                    stream: stream
+                });
+                
                 const response = await fetch('/api/generate', {
                     method: 'POST',
                     headers: {
@@ -377,6 +384,11 @@
                     })
                 });
                 
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `HTTP ${response.status}`);
+                }
+                
                 if (stream) {
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
@@ -386,6 +398,7 @@
                     const chatMessages = document.getElementById('chatMessages');
                     const messageDiv = document.createElement('div');
                     messageDiv.className = 'message assistant';
+                    messageDiv.textContent = 'Thinking...';
                     chatMessages.appendChild(messageDiv);
                     
                     while (true) {
@@ -409,26 +422,36 @@
                                         break;
                                     }
                                 } catch (e) {
-                                    console.error('Error parsing stream data:', e);
+                                    if (line.slice(6).trim()) { // Only log if there's actual content
+                                        console.error('Error parsing stream data:', e, 'Line:', line);
+                                    }
                                 }
                             }
                         }
                     }
                     
-                    if (assistantResponse) {
+                    if (assistantResponse.trim()) {
                         conversationHistory.push({ role: 'assistant', content: assistantResponse });
                         updateStatus('Response generated successfully!', 'success');
+                    } else {
+                        messageDiv.textContent = 'No response received';
+                        messageDiv.className += ' error';
                     }
                 } else {
                     const data = await response.json();
+                    console.log('Received response:', data);
                     
                     if (data.error) {
                         throw new Error(data.error);
                     }
                     
-                    addMessage(data.response, 'assistant');
-                    conversationHistory.push({ role: 'assistant', content: data.response });
-                    updateStatus('Response generated successfully!', 'success');
+                    if (data.response) {
+                        addMessage(data.response, 'assistant');
+                        conversationHistory.push({ role: 'assistant', content: data.response });
+                        updateStatus('Response generated successfully!', 'success');
+                    } else {
+                        throw new Error('No response received from server');
+                    }
                 }
             } catch (error) {
                 console.error('Error:', error);
