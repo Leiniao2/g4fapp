@@ -1,11 +1,10 @@
-from flask import Flask, render_template, request, jsonify, stream_template
+from flask import Flask, render_template, request, jsonify, Response
 import g4f
-import asyncio
 import json
 import logging
 from typing import Dict, List, Any
 import os
-from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 
 app = Flask(__name__)
@@ -14,9 +13,6 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Thread pool for async operations
-executor = ThreadPoolExecutor(max_workers=10)
 
 class GPT4FreeService:
     def __init__(self):
@@ -27,17 +23,27 @@ class GPT4FreeService:
         """Get available providers from g4f"""
         providers = {}
         try:
-            for provider_name in dir(g4f.Provider):
-                if not provider_name.startswith('_'):
-                    provider = getattr(g4f.Provider, provider_name)
-                    if hasattr(provider, 'working') and provider.working:
+            # Common working providers
+            provider_list = [
+                'Bing', 'ChatGpt', 'GPTalk', 'Liaobots', 'Phind',
+                'Yqcloud', 'You', 'Aichat', 'ChatBase', 'OpenaiChat'
+            ]
+            
+            for provider_name in provider_list:
+                try:
+                    if hasattr(g4f.Provider, provider_name):
+                        provider = getattr(g4f.Provider, provider_name)
                         providers[provider_name] = {
                             'name': provider_name,
-                            'working': provider.working,
-                            'supports_stream': getattr(provider, 'supports_stream', False),
-                            'supports_system_message': getattr(provider, 'supports_system_message', True),
+                            'working': True,
+                            'supports_stream': True,
+                            'supports_system_message': True,
                             'url': getattr(provider, 'url', '')
                         }
+                except Exception as e:
+                    logger.warning(f"Provider {provider_name} not available: {e}")
+                    continue
+                    
         except Exception as e:
             logger.error(f"Error getting providers: {e}")
         return providers
@@ -46,35 +52,37 @@ class GPT4FreeService:
         """Get available models from g4f"""
         models = {}
         try:
-            for model_name in dir(g4f.models):
-                if not model_name.startswith('_'):
-                    model = getattr(g4f.models, model_name)
-                    if hasattr(model, 'name'):
-                        models[model_name] = {
-                            'name': model.name,
-                            'base_provider': getattr(model, 'base_provider', ''),
-                            'best_provider': getattr(model, 'best_provider', '')
-                        }
+            # Common working models
+            model_list = [
+                'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'claude-v1',
+                'claude-instant-v1', 'palm', 'llama-2-7b', 'llama-2-13b'
+            ]
+            
+            for model_name in model_list:
+                models[model_name] = {
+                    'name': model_name,
+                    'base_provider': '',
+                    'best_provider': ''
+                }
+                
         except Exception as e:
             logger.error(f"Error getting models: {e}")
         return models
     
-    async def generate_response(self, messages: List[Dict], provider_name: str = None, model_name: str = None, stream: bool = False):
+    def generate_response(self, messages: List[Dict], provider_name: str = None, model_name: str = None, stream: bool = False):
         """Generate response using g4f"""
         try:
             # Get provider
             provider = None
-            if provider_name:
-                provider = getattr(g4f.Provider, provider_name, None)
+            if provider_name and hasattr(g4f.Provider, provider_name):
+                provider = getattr(g4f.Provider, provider_name)
             
-            # Get model
-            model = g4f.models.default
-            if model_name:
-                model = getattr(g4f.models, model_name, g4f.models.default)
+            # Get model - use string format for g4f
+            model = model_name if model_name else 'gpt-3.5-turbo'
             
             # Generate response
             if stream:
-                response = await g4f.ChatCompletion.create_async(
+                response = g4f.ChatCompletion.create(
                     model=model,
                     messages=messages,
                     provider=provider,
@@ -82,12 +90,14 @@ class GPT4FreeService:
                 )
                 return response
             else:
-                response = await g4f.ChatCompletion.create_async(
+                response = g4f.ChatCompletion.create(
                     model=model,
                     messages=messages,
-                    provider=provider
+                    provider=provider,
+                    stream=False
                 )
                 return response
+                
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             raise e
@@ -125,29 +135,38 @@ def generate():
         if not messages:
             return jsonify({'error': 'No messages provided'}), 400
         
-        # Run async function in thread pool
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Simple validation and formatting
+        formatted_messages = []
+        for msg in messages:
+            if 'role' in msg and 'content' in msg:
+                formatted_messages.append({
+                    'role': msg['role'],
+                    'content': str(msg['content'])
+                })
+        
+        if not formatted_messages:
+            return jsonify({'error': 'Invalid message format'}), 400
         
         try:
             if stream:
                 def generate_stream():
                     try:
-                        response = loop.run_until_complete(
-                            gpt4free_service.generate_response(
-                                messages, provider_name, model_name, stream=True
-                            )
+                        response = gpt4free_service.generate_response(
+                            formatted_messages, provider_name, model_name, stream=True
                         )
+                        
+                        # Handle streaming response
                         for chunk in response:
                             if chunk:
                                 yield f"data: {json.dumps({'content': chunk})}\n\n"
+                        
                         yield f"data: {json.dumps({'done': True})}\n\n"
+                        
                     except Exception as e:
+                        logger.error(f"Streaming error: {e}")
                         yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                    finally:
-                        loop.close()
                 
-                return app.response_class(
+                return Response(
                     generate_stream(),
                     mimetype='text/event-stream',
                     headers={
@@ -157,14 +176,14 @@ def generate():
                     }
                 )
             else:
-                response = loop.run_until_complete(
-                    gpt4free_service.generate_response(
-                        messages, provider_name, model_name, stream=False
-                    )
+                response = gpt4free_service.generate_response(
+                    formatted_messages, provider_name, model_name, stream=False
                 )
                 return jsonify({'response': response})
-        finally:
-            loop.close()
+                
+        except Exception as e:
+            logger.error(f"Generation error: {e}")
+            return jsonify({'error': f'Generation failed: {str(e)}'}), 500
             
     except Exception as e:
         logger.error(f"Error in generate endpoint: {e}")
