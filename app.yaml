@@ -1,0 +1,23 @@
+runtime: python39
+
+env_variables:
+  SECRET_KEY: "your-secret-key-change-this-in-production"
+  
+instance_class: F2
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 10
+  target_cpu_utilization: 0.6
+  target_throughput_utilization: 0.6
+
+handlers:
+- url: /static
+  static_dir: static
+  
+- url: /.*
+  script: main.app
+  secure: always
+
+# Optional: Set timeout for requests
+entrypoint: gunicorn -b :$PORT main:app --timeout 300 --workers 2
