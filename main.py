@@ -18,15 +18,16 @@ class GPT4FreeService:
     def __init__(self):
         self.providers = self._get_available_providers()
         self.models = self._get_available_models()
+        self.working_providers = self._test_providers()
     
     def _get_available_providers(self) -> Dict[str, Any]:
         """Get available providers from g4f"""
         providers = {}
         try:
-            # Common working providers
+            # Most reliable providers (updated list)
             provider_list = [
-                'Bing', 'ChatGpt', 'GPTalk', 'Liaobots', 'Phind',
-                'Yqcloud', 'You', 'Aichat', 'ChatBase', 'OpenaiChat'
+                'You', 'Aichat', 'ChatBase', 'FreeGpt', 'GPTalk', 
+                'Liaobots', 'Phind', 'Yqcloud', 'Bing'
             ]
             
             for provider_name in provider_list:
@@ -50,57 +51,154 @@ class GPT4FreeService:
     
     def _get_available_models(self) -> Dict[str, Any]:
         """Get available models from g4f"""
-        models = {}
-        try:
-            # Common working models
-            model_list = [
-                'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'claude-v1',
-                'claude-instant-v1', 'palm', 'llama-2-7b', 'llama-2-13b'
-            ]
-            
-            for model_name in model_list:
-                models[model_name] = {
-                    'name': model_name,
-                    'base_provider': '',
-                    'best_provider': ''
-                }
-                
-        except Exception as e:
-            logger.error(f"Error getting models: {e}")
+        models = {
+            'gpt-3.5-turbo': {'name': 'GPT-3.5 Turbo', 'base_provider': '', 'best_provider': ''},
+            'gpt-4': {'name': 'GPT-4', 'base_provider': '', 'best_provider': ''},
+            'claude-v1': {'name': 'Claude v1', 'base_provider': '', 'best_provider': ''},
+            'palm': {'name': 'PaLM', 'base_provider': '', 'best_provider': ''},
+        }
         return models
     
-    def generate_response(self, messages: List[Dict], provider_name: str = None, model_name: str = None, stream: bool = False):
-        """Generate response using g4f"""
-        try:
-            # Get provider
-            provider = None
-            if provider_name and hasattr(g4f.Provider, provider_name):
+    def _test_providers(self) -> List[str]:
+        """Test providers to see which ones are working"""
+        working = []
+        test_messages = [{"role": "user", "content": "Hi"}]
+        
+        for provider_name in self.providers.keys():
+            try:
                 provider = getattr(g4f.Provider, provider_name)
-            
-            # Get model - use string format for g4f
-            model = model_name if model_name else 'gpt-3.5-turbo'
-            
-            # Generate response
+                # Quick test
+                response = g4f.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=test_messages,
+                    provider=provider,
+                    stream=False,
+                    timeout=10
+                )
+                if response and len(str(response).strip()) > 0:
+                    working.append(provider_name)
+                    logger.info(f"Provider {provider_name} is working")
+                else:
+                    logger.warning(f"Provider {provider_name} returned empty response")
+            except Exception as e:
+                logger.warning(f"Provider {provider_name} test failed: {e}")
+                continue
+        
+        logger.info(f"Working providers: {working}")
+        return working
+    
+    def generate_response(self, messages: List[Dict], provider_name: str = None, model_name: str = None, stream: bool = False):
+        """Generate response using g4f with fallback mechanism"""
+        
+        # Clean and validate messages
+        clean_messages = []
+        for msg in messages:
+            if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                clean_messages.append({
+                    'role': str(msg['role']).lower(),
+                    'content': str(msg['content']).strip()
+                })
+        
+        if not clean_messages:
+            raise ValueError("No valid messages provided")
+        
+        # Get model
+        model = model_name if model_name else 'gpt-3.5-turbo'
+        
+        # Try specified provider first, then fallback to working providers
+        providers_to_try = []
+        if provider_name and provider_name in self.providers:
+            providers_to_try.append(provider_name)
+        
+        # Add working providers as fallback
+        providers_to_try.extend([p for p in self.working_providers if p not in providers_to_try])
+        
+        # If no working providers, try all available providers
+        if not providers_to_try:
+            providers_to_try = list(self.providers.keys())
+        
+        # Try providers one by one
+        last_error = None
+        for provider_name in providers_to_try:
+            try:
+                logger.info(f"Trying provider: {provider_name}")
+                provider = getattr(g4f.Provider, provider_name)
+                
+                if stream:
+                    response = g4f.ChatCompletion.create(
+                        model=model,
+                        messages=clean_messages,
+                        provider=provider,
+                        stream=True,
+                        timeout=30
+                    )
+                else:
+                    response = g4f.ChatCompletion.create(
+                        model=model,
+                        messages=clean_messages,
+                        provider=provider,
+                        stream=False,
+                        timeout=30
+                    )
+                
+                # Validate response
+                if response:
+                    if stream:
+                        return response  # Return generator for streaming
+                    else:
+                        response_str = str(response).strip()
+                        if response_str and len(response_str) > 0:
+                            logger.info(f"Success with provider: {provider_name}")
+                            return response_str
+                        else:
+                            logger.warning(f"Empty response from provider: {provider_name}")
+                            continue
+                else:
+                    logger.warning(f"No response from provider: {provider_name}")
+                    continue
+                    
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Provider {provider_name} failed: {e}")
+                continue
+        
+        # If all providers failed, try without specifying provider
+        try:
+            logger.info("Trying without specific provider")
             if stream:
                 response = g4f.ChatCompletion.create(
                     model=model,
-                    messages=messages,
-                    provider=provider,
-                    stream=True
+                    messages=clean_messages,
+                    stream=True,
+                    timeout=30
                 )
-                return response
             else:
                 response = g4f.ChatCompletion.create(
                     model=model,
-                    messages=messages,
-                    provider=provider,
-                    stream=False
+                    messages=clean_messages,
+                    stream=False,
+                    timeout=30
                 )
-                return response
-                
+            
+            if response:
+                if stream:
+                    return response
+                else:
+                    response_str = str(response).strip()
+                    if response_str:
+                        return response_str
+                        
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            raise e
+            last_error = e
+            logger.error(f"Final attempt failed: {e}")
+        
+        # If everything failed
+        raise Exception(f"All providers failed. Last error: {last_error}")
+    
+    def refresh_working_providers(self):
+        """Refresh the list of working providers"""
+        self.working_providers = self._test_providers()
+        return self.working_providers
 
 # Initialize service
 gpt4free_service = GPT4FreeService()
@@ -122,6 +220,18 @@ def get_models():
     """Get available models"""
     return jsonify(gpt4free_service.models)
 
+@app.route('/api/refresh-providers', methods=['POST'])
+def refresh_providers():
+    """Refresh working providers"""
+    try:
+        working = gpt4free_service.refresh_working_providers()
+        return jsonify({
+            'working_providers': working,
+            'total_providers': len(gpt4free_service.providers)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/generate', methods=['POST'])
 def generate():
     """Generate response from GPT4Free"""
@@ -135,32 +245,28 @@ def generate():
         if not messages:
             return jsonify({'error': 'No messages provided'}), 400
         
-        # Simple validation and formatting
-        formatted_messages = []
-        for msg in messages:
-            if 'role' in msg and 'content' in msg:
-                formatted_messages.append({
-                    'role': msg['role'],
-                    'content': str(msg['content'])
-                })
-        
-        if not formatted_messages:
-            return jsonify({'error': 'Invalid message format'}), 400
+        logger.info(f"Generate request: provider={provider_name}, model={model_name}, stream={stream}")
+        logger.info(f"Messages: {messages}")
         
         try:
             if stream:
                 def generate_stream():
                     try:
                         response = gpt4free_service.generate_response(
-                            formatted_messages, provider_name, model_name, stream=True
+                            messages, provider_name, model_name, stream=True
                         )
                         
                         # Handle streaming response
+                        content_sent = False
                         for chunk in response:
-                            if chunk:
-                                yield f"data: {json.dumps({'content': chunk})}\n\n"
+                            if chunk and str(chunk).strip():
+                                content_sent = True
+                                yield f"data: {json.dumps({'content': str(chunk)})}\n\n"
                         
-                        yield f"data: {json.dumps({'done': True})}\n\n"
+                        if not content_sent:
+                            yield f"data: {json.dumps({'error': 'No content received from provider'})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({'done': True})}\n\n"
                         
                     except Exception as e:
                         logger.error(f"Streaming error: {e}")
@@ -177,9 +283,13 @@ def generate():
                 )
             else:
                 response = gpt4free_service.generate_response(
-                    formatted_messages, provider_name, model_name, stream=False
+                    messages, provider_name, model_name, stream=False
                 )
-                return jsonify({'response': response})
+                
+                if response and str(response).strip():
+                    return jsonify({'response': str(response)})
+                else:
+                    return jsonify({'error': 'No response generated'}), 500
                 
         except Exception as e:
             logger.error(f"Generation error: {e}")
@@ -195,7 +305,9 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'providers_count': len(gpt4free_service.providers),
-        'models_count': len(gpt4free_service.models)
+        'models_count': len(gpt4free_service.models),
+        'working_providers': gpt4free_service.working_providers,
+        'working_count': len(gpt4free_service.working_providers)
     })
 
 @app.errorhandler(404)
